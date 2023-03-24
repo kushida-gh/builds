@@ -1,0 +1,107 @@
+# Zabbix on Rocky Linux 9.1 (minimal OS install)
+# MySQL files are under /var/lib/mysql - may be worth partitioning storage to accommodate accordingly
+#
+# Much of this was derived from
+# https://www.zabbix.com/download?zabbix=6.4&os_distribution=rocky_linux&os_version=9&components=server_frontend_agent&db=mysql&ws=apache
+# but with some additional tweaks
+
+
+# Install Apache httpd, mod_ssl, mysqld, system locale packs, and net-tools packages
+sudo dnf install -y httpd mod_ssl mysql-server langpacks-en glibc-all-langpacks net-tools
+sudo systemctl enable mysqld
+sudo systemctl start mysqld
+sudo systemctl enable httpd
+sudo systemctl start httpd
+
+
+# Temporary self-signed cert just to get started, replace with a properly-issued certificate from an authority you trust
+sudo openssl req -x509 -sha256 -nodes -days 365 -newkey rsa:2048 -keyout /etc/pki/tls/private/$(hostname)-$(date +%Y-%m-%d).key -out /etc/pki/tls/certs/$(hostname)-$(date +%Y-%m-%d).crt
+
+
+# update httpd ssl.conf
+sudo vi /etc/httpd/conf.d/ssl.conf
+	DocumentRoot "/usr/share/zabbix"
+	SSLCertificateFile /etc/pki/tls/certs/REPLACE-THIS-WITH-THE-.crt-FILE-YOU-JUST-CREATED
+	SSLCertificateKeyFile /etc/pki/tls/private/REPLACE-THIS-WITH-THE-.key-FILE-YOU-JUST-CREATED
+
+
+# General httpd hardening
+sudo sed -i '1s/^/ServerTokens Prod\n/' /etc/httpd/conf/httpd.conf
+sudo sed -i '2s/^/ServerSignature Off\n/' /etc/httpd/conf/httpd.conf
+sudo sed -i '3s/^/FileETag None\n/' /etc/httpd/conf/httpd.conf
+sudo sed -i '4s/^/TraceEnable Off\n/' /etc/httpd/conf/httpd.conf
+sudo sed -i '5s/^/Header set X-XSS-Protection "1; mode=block"\n/' /etc/httpd/conf/httpd.conf
+sudo sed -i '6s/^/Header edit Set-Cookie ^(.*)$ $1;HttpOnly;Secure\n/' /etc/httpd/conf/httpd.conf
+sudo sed -i '7s/^/Header always append X-Frame-Options SAMEORIGIN\n/' /etc/httpd/conf/httpd.conf
+sudo sed -i '8s/^/Timeout 60\n/' /etc/httpd/conf/httpd.conf
+sudo sed -i '9s/^/\n/' /etc/httpd/conf/httpd.conf
+
+# TLS Tuning
+sudo sed -i '1s/^/SSLProtocol -ALL +TLSv1.2\n/' /etc/httpd/conf.d/ssl.conf
+sudo sed -i 's/^SSLCipherSuite PROFILE=SYSTEM/SSLCipherSuite HIGH:!MEDIUM:!aNULL:!MD5:!RC4/g' /etc/httpd/conf.d/ssl.conf
+
+# Enable Strict Transport Security (HSTS)
+sudo bash -c "echo -e >> /etc/httpd/conf/httpd.conf"
+sudo bash -c "echo '<VirtualHost *:443>' >> /etc/httpd/conf/httpd.conf"
+sudo bash -c "echo '   Header set Strict-Transport-Security "max-age=31536000"' >> /etc/httpd/conf/httpd.conf"
+sudo bash -c "echo '</VirtualHost>' >> /etc/httpd/conf/httpd.conf"
+
+sudo systemctl restart httpd
+
+
+# If EPEL repo is enabled, then...
+sudo vi /etc/yum.repos.d/epel.repo
+[epel]
+...
+excludepkgs=zabbix*
+
+# Download Zabbix packages
+sudo rpm -Uvh https://repo.zabbix.com/zabbix/6.4/rhel/9/x86_64/zabbix-release-6.4-1.el9.noarch.rpm
+sudo dnf clean all
+sudo dnf install -y zabbix-server-mysql zabbix-web-mysql zabbix-apache-conf zabbix-sql-scripts zabbix-selinux-policy zabbix-agent
+
+# Harden MySQL
+sudo mysql_secure_installation
+
+	(enter option "2" for the password validation policy)
+	(create new mysqld root password)
+	(answer Y to all the other questions)
+
+mysql -u root -p
+[ new password in previous step ]
+mysql> create database zabbix character set utf8mb4 collate utf8mb4_bin;
+mysql> create user zabbix@localhost identified by '[ a new password for the zabbix user which is different from the mysql root user ]';
+mysql> grant all privileges on zabbix.* to zabbix@localhost;
+mysql> set global log_bin_trust_function_creators = 1;
+mysql> quit;
+
+# Import initial schema and data
+sudo zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | mysql --default-character-set=utf8mb4 -u zabbix -p zabbix
+[ enter zabbix user password set in previous step; this step may take a minute ]
+
+# Disable log_bin_trust_function_creators option after importing database schema
+mysql -u root -p
+[ mysqld root password ]
+mysql> set global log_bin_trust_function_creators = 0;
+mysql> quit;
+
+
+# Update DBPassword directive in Zabbix conf file
+sudo vi /etc/zabbix/zabbix_server.conf
+
+	DBPassword=[ zabbix user password set previously ]
+
+# Set services to run at boot
+sudo systemctl enable zabbix-server zabbix-agent php-fpm
+sudo systemctl restart zabbix-server zabbix-agent php-fpm
+
+# Verify that Zabbix, httpd, and mysqld processes are running
+sudo netstat -antp | grep -E 'zabbix|httpd|mysqld'
+
+
+# Finally, go to the GUI (if firewalld is preventing you access, you may need to configure it for TCP 80/443 or stop it temporarily via "sudo systemctl stop firewalld")
+
+https://your-zabbix-hostname-or-ip-address/zabbix
+	Go through initial setup wizard (click Next to all except in step 2 add in the zabbix user DB password set previously)
+	Admin / zabbix as initial superuser
+	Go to Users > Users and set a new password for the Admin user
