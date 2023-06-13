@@ -1,0 +1,44 @@
+# Certbot install for Rocky Linux 9 using snapd when server is
+# network-restricted behind a forward proxy for Internet access
+#
+# Assumes Apache httpd as the web server here
+
+
+# Install snapd
+sudo dnf install -y snapd
+sudo systemctl enable --now snapd.socket
+
+( logoff, log back in )
+
+# Set snap to use a proxy to access the Internet
+# (this may take up to around a minute)
+#
+# proxy host:port is assumed to be 192.168.255.41:8080,
+# replace with specifics of your environment
+sudo snap set system proxy.http=http://192.168.255.41:8080
+sudo snap set system proxy.https=http://192.168.255.41:8080
+
+sudo ln -s /var/lib/snapd/snap /snap
+sudo snap install --classic certbot
+sudo ln -s /snap/bin/certbot /usr/bin/certbot
+
+
+# Certbot relies on environment variables within /etc/environment
+# to know where the proxy is
+sudo sh -c 'echo "http_proxy=http://192.168.255.41:8080" >> /etc/environment'
+sudo sh -c 'echo "https_proxy=http://192.168.255.41:8080" >> /etc/environment'
+
+
+# Add to httpd.conf if no such entry already exits (does not by default)
+sudo vi /etc/httpd/conf/httpd.conf 
+
+<VirtualHost *:80>
+   ServerAdmin admin@example.com
+   DocumentRoot /var/www/html
+   ServerName example.com
+   ServerAlias www.example.com
+</VirtualHost>
+
+
+sudo certbot --apache
+sudo certbot renew --dry-run
